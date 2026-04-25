@@ -283,8 +283,14 @@ def _col_score(a: str, b: str, **_kwargs) -> float:
 
 
 def fuzzy_intersect_columns(
-    states: dict[str, dict], threshold: int = 80
+    states: dict[str, dict], threshold: int = 80, min_coverage: float = 0.5
 ) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """Return columns present (with fuzzy match) in at least `min_coverage` fraction of states.
+
+    States that lack a matched column will leave it blank in the output rather than
+    causing the column to be dropped entirely.  This lets X_22_* demographic fields
+    survive even when a handful of states were exported without them.
+    """
     skip = {"ID", "Label"}
     state_cols = {k: [c for c in v["cols"] if c not in skip] for k, v in states.items()}
     if not state_cols:
@@ -293,6 +299,7 @@ def fuzzy_intersect_columns(
     ref_key = max(state_cols, key=lambda k: len(state_cols[k]))
     ref_cols = state_cols[ref_key]
     other_keys = [k for k in state_cols if k != ref_key]
+    n_states = len(states)
 
     canonical_cols: list[str] = []
     remap: dict[str, dict[str, str]] = {k: {} for k in states}
@@ -300,25 +307,24 @@ def fuzzy_intersect_columns(
         remap[ref_key][col] = col
 
     for ref_col in ref_cols:
-        matched_in_all = True
         per_state_match: dict[str, str] = {ref_key: ref_col}
+        matched = 1  # ref_key always counts
 
         for other_key in other_keys:
             other_col_list = state_cols[other_key]
             if not other_col_list:
-                matched_in_all = False
-                break
+                continue
             if ref_col in other_col_list:
                 per_state_match[other_key] = ref_col
+                matched += 1
                 continue
             result = process.extractOne(ref_col, other_col_list, scorer=_col_score)
             if result and result[1] >= threshold:
                 per_state_match[other_key] = result[0]
-            else:
-                matched_in_all = False
-                break
+                matched += 1
+            # else: state simply won't have this column (filled blank downstream)
 
-        if matched_in_all:
+        if matched / n_states >= min_coverage:
             canonical_cols.append(ref_col)
             for state_key, state_col in per_state_match.items():
                 remap[state_key][state_col] = ref_col
