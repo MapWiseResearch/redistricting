@@ -103,8 +103,20 @@ def _parse_dra_col(col: str) -> dict | None:
         return None
     rest = parts[2] if len(parts) == 3 else parts[2] + "_" + parts[3]
     rest_parts = rest.split("_")
+    known_datasets = sorted(
+        set(_ELECTION_DATASET_LABELS) | set(_DEMO_DATASET_LABELS),
+        key=len,
+        reverse=True,
+    )
     dataset = rest_parts[0]
-    field = "_".join(rest_parts[1:]) if len(rest_parts) > 1 else ""
+    field_parts = rest_parts[1:]
+    for candidate in known_datasets:
+        candidate_parts = candidate.split("_")
+        if rest_parts[:len(candidate_parts)] == candidate_parts:
+            dataset = candidate
+            field_parts = rest_parts[len(candidate_parts):]
+            break
+    field = "_".join(field_parts)
     return {"category": category, "year_raw": year_raw,
             "year_int": year_int, "dataset": dataset, "field": field}
 
@@ -219,6 +231,9 @@ def collect_state_data(plan_dir: Path) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 _EXCLUSIVE_DATASETS = frozenset({"VAP", "CVAP", "ACS", "CENS", "CENS_ADJ"})
+_COMPATIBLE_DATASET_GROUPS = (
+    frozenset({"CENS", "CENS_ADJ"}),
+)
 _FIELD_SUFFIX = {"D": "Dem", "R": "Rep", "T": "Total", "Tot": "Total"}
 _DATASET_KEYWORDS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?i)(?:^|[_\s.(])pres(ident)?[_\s.),]?"), "PRES"),
@@ -269,7 +284,36 @@ def _normalize_col(col: str) -> str:
     return col
 
 
+def _canonical_match_parts(col: str) -> dict | None:
+    normalized = _normalize_col(col)
+    parsed = _parse_dra_col(normalized)
+    if parsed is None:
+        return None
+    parsed = parsed.copy()
+    if parsed["category"] == "X" and parsed["dataset"] in _ELECTION_DATASET_LABELS:
+        parsed["category"] = "E"
+    return parsed
+
+
 def _col_score(a: str, b: str, **_kwargs) -> float:
+    parsed_a = _canonical_match_parts(a)
+    parsed_b = _canonical_match_parts(b)
+    if parsed_a is not None and parsed_b is not None:
+        if parsed_a["category"] != parsed_b["category"]:
+            return 0.0
+        if parsed_a["year_int"] != parsed_b["year_int"]:
+            return 0.0
+
+        field_a = _FIELD_SUFFIX.get(parsed_a["field"], parsed_a["field"]).upper()
+        field_b = _FIELD_SUFFIX.get(parsed_b["field"], parsed_b["field"]).upper()
+        if field_a != field_b:
+            return 0.0
+
+        datasets = {parsed_a["dataset"], parsed_b["dataset"]}
+        compatible = any(datasets <= group for group in _COMPATIBLE_DATASET_GROUPS)
+        if parsed_a["dataset"] != parsed_b["dataset"] and not compatible:
+            return 0.0
+
     ya, yb = _get_col_year(a), _get_col_year(b)
     if ya is not None and yb is not None and ya != yb:
         return 0.0
@@ -277,7 +321,8 @@ def _col_score(a: str, b: str, **_kwargs) -> float:
     toks_b = {t.upper() for t in re.split(r"[_\s\-]+", b)}
     excl_a = toks_a & _EXCLUSIVE_DATASETS
     excl_b = toks_b & _EXCLUSIVE_DATASETS
-    if excl_a and excl_b and not excl_a & excl_b:
+    compatible = any((excl_a | excl_b) <= group for group in _COMPATIBLE_DATASET_GROUPS)
+    if excl_a and excl_b and not excl_a & excl_b and not compatible:
         return 0.0
     return _fuzz.token_sort_ratio(_normalize_col(a), _normalize_col(b))
 
